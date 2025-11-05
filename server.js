@@ -5,9 +5,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const SOURCE = "http://centra.ink/live/Centra_Live_iVIOT/zTsGiHyZ884M/1477206.m3u8";
-const BASE = "http://centra.ink/live/Centra_Live_iVIOT/zTsGiHyZ884M";
+let latestHlsPath = ""; // store latest /hls/<token> path
 
-// Allow CORS for all browsers
+// Enable CORS
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,HEAD,OPTIONS");
@@ -15,20 +15,24 @@ app.use((req, res, next) => {
   next();
 });
 
-// Serve rewritten M3U8 playlist
+// Proxy and rewrite M3U8
 app.get("/stream.m3u8", async (req, res) => {
   try {
     const response = await fetch(SOURCE);
     if (!response.ok) throw new Error(`Failed to fetch M3U8: ${response.status}`);
 
     let text = await response.text();
+
+    // Extract the first /hls/<token>/ path from the playlist
+    const match = text.match(/\/hls\/[A-Za-z0-9]+/);
+    if (match) latestHlsPath = match[0];
+
     const host = `${req.protocol}://${req.get("host")}`;
 
-    // Clean and rewrite all segment URLs to point to your Render domain
-    text = text
-      .replace(/\/hls\/[A-Za-z0-9]+\/[^\/\n]*?(\d+_\d+\.ts)/g, `${host}/$1`)
-      .replace(/(^|\n)(\d+_\d+\.ts)/g, `$1${host}/$2`)
-      .replace(/(^|\n)(\d+\.ts)/g, `$1${host}/$2`);
+    // Replace segment URLs with Render domain
+    text = text.replace(/\/hls\/[A-Za-z0-9]+\/[^\/\n]*?(\d+_\d+\.ts)/g, `${host}/$1`);
+    text = text.replace(/(^|\n)(\d+_\d+\.ts)/g, `$1${host}/$2`);
+    text = text.replace(/(^|\n)(\d+\.ts)/g, `$1${host}/$2`);
 
     res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
     res.send(text);
@@ -38,29 +42,30 @@ app.get("/stream.m3u8", async (req, res) => {
   }
 });
 
-// Proxy and serve TS segments
+// Serve TS segments with correct /hls/<token>/ prefix
 app.get("/*.ts", async (req, res) => {
   try {
     const filename = req.path.split("/").pop();
-    const segmentUrl = `${BASE}/${filename}`;
+    if (!latestHlsPath) throw new Error("No HLS token path found yet");
 
+    const segmentUrl = `http://centra.ink/live/Centra_Live_iVIOT/zTsGiHyZ884M${latestHlsPath}/${filename}`;
     const response = await fetch(segmentUrl);
-    if (!response.ok) throw new Error(`Segment not found: ${filename}`);
+    if (!response.ok) throw new Error(`Segment not found: ${segmentUrl}`);
 
     res.setHeader("Content-Type", "video/mp2t");
     response.body.pipe(res);
   } catch (err) {
-    console.error("Error fetching segment:", err);
+    console.error("Error fetching TS segment:", err.message);
     res.status(500).send("Error loading segment");
   }
 });
 
-// Serve an embedded HTML test player directly (no file required)
+// Built-in HTML player
 app.get("/", (req, res) => {
   res.setHeader("Content-Type", "text/html");
   res.send(`
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
   <meta charset="UTF-8" />
   <title>HLS Player</title>
@@ -75,7 +80,6 @@ app.get("/", (req, res) => {
   <script>
     const video = document.getElementById('video');
     const streamURL = '/stream.m3u8';
-
     if (Hls.isSupported()) {
       const hls = new Hls();
       hls.loadSource(streamURL);
@@ -85,7 +89,7 @@ app.get("/", (req, res) => {
       video.src = streamURL;
       video.addEventListener('loadedmetadata', () => video.play());
     } else {
-      document.body.innerHTML = '<h2 style="color:white;text-align:center;">Your browser does not support HLS playback.</h2>';
+      document.body.innerHTML = '<h2 style="color:white;text-align:center;">Your browser does not support HLS.</h2>';
     }
   </script>
 </body>
